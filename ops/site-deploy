@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# GitHub-first production deploy runner.
+# Usage: site-deploy <site-slug> <40-char-commit-sha>
+
+SLUG="${1:-}"
+SHA="${2:-}"
+DB=(sudo -n -u ubuntu psql -U web_manager -d web_manager -At -F $'\t' -v ON_ERROR_STOP=1 -c)
+
+fail(){ echo "ERROR: $*" >&2; exit 1; }
+sql_escape(){ printf '%s' "$1" | sed "s/'/''/g"; }
+psqlq(){ "${DB[@]}" "$1"; }
+git_as(){ local owner="$1" repo="$2"; shift 2; sudo -n -u "$owner" git -C "$repo" "$@"; }
+
+[[ "$SLUG" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || fail "invalid slug"
+[[ "$SHA" =~ ^[0-9a-fA-F]{40}$ ]] || fail "commit must be a full 40-character SHA"
+SHA="${SHA,,}"
+
+exec 9>"/run/lock/site-deploy-${SLUG}.lock"
+flock -n 9 || fail "deployment already running for ${SLUG}"
+
+ROW="$(psqlq "select s.id,s.server_path,coalesce(s.port,0),coalesce(d.hostname,'') from manager.sites s left join lateral (select hostname from manager.site_domains where site_id=s.id and is_primary=true limit 1) d on true where s.slug='$(sql_escape "$SLUG")' and s.archived_at is null limit 1")"
+[[ -n "$ROW" ]] || fail "site not found: ${SLUG}"
+IFS=$'\t' read -r SITE_ID REPO PORT DOMAIN <<<"$ROW"
+[[ -d "$REPO/.git" ]] || fail "not a git repository: ${REPO}"
+OWNER="$(stat -c '%U' "$REPO")"
+ORIGIN="$(git_as "$OWNER" "$REPO" remote get-url origin)"
+
+DIRTY="$(git_as "$OWNER" "$REPO" status --porcelain)"
+[[ -z "$DIRTY" ]] || fail "working tree is dirty; server-side edits are forbidden"
+
+git_as "$OWNER" "$REPO" fetch --prune origin main
+git_as "$OWNER" "$REPO" cat-file -e "${SHA}^{commit}" || fail "commit not found after fetch"
+git_as "$OWNER" "$REPO" merge-base --is-ancestor "$SHA" origin/main || fail "commit is not on origin/main"
+PREVIOUS="$(git_as "$OWNER" "$REPO" rev-parse HEAD)"
+
+META="$(python3 - "$ORIGIN" "$PREVIOUS" <<'PY'
+import json,sys
+print(json.dumps({'repo_url':sys.argv[1],'previous_sha':sys.argv[2],'branch':'main','deployer':'chatgpt-main'}))
+PY
+)"
+DEPLOY_ID="$(psqlq "insert into manager.deployments(site_id,source_commit,status,message,metadata,started_at) values ('$SITE_ID','$SHA','deploying','GitHub-first deploy','$(sql_escape "$META")'::jsonb,now()) returning id")"
+
+mark_failed(){
+  local msg="$1" status="${2:-failed}"
+  psqlq "update manager.deployments set status='$(sql_escape "$status")',message='$(sql_escape "$msg")',finished_at=now() where id='$DEPLOY_ID'" >/dev/null || true
+}
+
+preflight(){
+  case "$SLUG" in
+    web-admin)
+      node --check "$REPO/server-v2.mjs" >/dev/null
+      [[ -s "$REPO/app/index.html" ]]
+      ;;
+    *)
+      [[ -f "$REPO/compose.yml" ]] || fail "compose.yml missing"
+      (cd "$REPO" && docker compose config -q)
+      ;;
+  esac
+}
+
+activate(){
+  case "$SLUG" in
+    web-admin) systemctl restart web-admin.service ;;
+    *) (cd "$REPO" && docker compose up -d --remove-orphans) ;;
+  esac
+}
+
+health(){
+  local i code
+  for i in {1..20}; do
+    if curl -fsS --max-time 4 "http://127.0.0.1:${PORT}/" >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/" >/dev/null
+  if [[ -n "$DOMAIN" ]]; then
+    code="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' "https://${DOMAIN}/" || true)"
+    if [[ "$SLUG" == "web-admin" ]]; then
+      [[ "$code" =~ ^(2|3)[0-9][0-9]$ || "$code" == "401" ]] || return 1
+    else
+      [[ "$code" =~ ^(2|3)[0-9][0-9]$ ]] || return 1
+    fi
+  fi
+}
+
+rollback(){
+  echo "Deploy failed; rolling back ${SLUG} to ${PREVIOUS}" >&2
+  git_as "$OWNER" "$REPO" reset --hard "$PREVIOUS" >/dev/null
+  activate >/dev/null 2>&1 || true
+  if health; then
+    psqlq "update manager.sites set current_commit='$(sql_escape "$PREVIOUS")',updated_at=now() where id='$SITE_ID'; update manager.deployments set status='rolled_back',message='Deployment failed; automatically rolled back to $(sql_escape "$PREVIOUS")',finished_at=now(),metadata=metadata||'{\"rollback_ok\":true}'::jsonb where id='$DEPLOY_ID'" >/dev/null || true
+    return 0
+  fi
+  mark_failed "Deployment failed and rollback health check also failed"
+  return 1
+}
+
+trap 'rc=$?; if [[ $rc -ne 0 ]]; then rollback || true; fi; exit $rc' ERR
+
+preflight
+git_as "$OWNER" "$REPO" reset --hard "$SHA" >/dev/null
+preflight
+activate
+health
+
+psqlq "update manager.sites set current_commit='$SHA',updated_at=now() where id='$SITE_ID'; update manager.deployments set status='succeeded',message='Deployed and health-checked',finished_at=now(),metadata=metadata||'{\"local_health\":true,\"public_health\":true}'::jsonb where id='$DEPLOY_ID'" >/dev/null
+trap - ERR
+
+echo "DEPLOY_OK slug=${SLUG} sha=${SHA} previous=${PREVIOUS}"
