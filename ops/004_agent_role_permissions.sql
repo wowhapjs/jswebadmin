@@ -1,5 +1,6 @@
 -- Agent role permission baseline and public site metadata view.
 -- Non-destructive / additive migration.
+-- Apply with a database owner/superuser; runtime agents use web_manager afterward.
 
 DO $$
 BEGIN
@@ -98,6 +99,12 @@ DROP TRIGGER IF EXISTS agent_sessions_apply_role_policy ON manager.agent_session
 CREATE TRIGGER agent_sessions_apply_role_policy
 BEFORE INSERT OR UPDATE OF role,permissions ON manager.agent_sessions
 FOR EACH ROW EXECUTE FUNCTION manager.apply_agent_role_policy();
+
+-- Runtime agents connect as web_manager. Public site identity/address metadata must be
+-- directly readable; policy configuration is readable and updatable by MAIN_ADMIN flows.
+GRANT SELECT, INSERT, UPDATE ON manager.agent_role_policies TO web_manager;
+GRANT SELECT ON manager.site_public_overview TO web_manager;
+GRANT EXECUTE ON FUNCTION manager.apply_agent_role_policy() TO web_manager;
 
 UPDATE manager.agent_sessions a
 SET permissions = a.permissions || p.permissions
