@@ -30,7 +30,7 @@ case "$CMD" in
     ((${#DOMAINS[@]} >= 1 && ${#DOMAINS[@]} <= 50)) || { echo 'invalid domain count' >&2; exit 2; }
     SUBS=()
     for D in "${DOMAINS[@]}"; do
-      [[ "$D" =~ ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.duckdns\.org$ ]] || { echo 'invalid DuckDNS domain' >&2; exit 2; }
+      [[ "$D" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.duckdns\.org$ ]] || { echo 'invalid DuckDNS domain' >&2; exit 2; }
       SUBS+=("${D%.duckdns.org}")
     done
     SUBDOMAINS="$(IFS=,; echo "${SUBS[*]}")"
