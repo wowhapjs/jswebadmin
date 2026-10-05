@@ -1,24 +1,51 @@
 # ChatGPT 관리형 웹 서버 최초 구축 명세
 
+**버전:** 1.1  
+**기준일:** 2026-10-05  
+**상태:** AUTHORITATIVE BUILD SPEC
+
+이 문서는 새 Ubuntu 서버를 현재 운영 모델과 동일하게 구축하기 위한 최초 설치 명세다. 에이전트의 승인·코딩·배포·복구 판단은 `AGENT_ROLE_OPERATIONS_GUIDE_KO.md`를 따른다. 두 문서가 실제 운영 구조와 달라지면 같은 변경 세션에서 함께 갱신한다.
+
 ## 1. 목적과 운영 전제
 
-이 문서는 새 Ubuntu 서버를 현재 운영 모델과 동일하게 구축하기 위한 최초 설치 명세다. 이 서버는 일반적인 사람이 직접 SSH로 개발하고 CI/CD가 자동 배포하는 구조가 아니라, **ChatGPT가 코딩·릴리스 판단·배포 오케스트레이션을 수행하는 서버**를 전제로 한다.
+이 서버는 사람이 SSH에서 직접 개발하고 CI/CD가 자동 배포하는 구조가 아니라 **ChatGPT가 코딩·릴리스 판단·배포 오케스트레이션을 수행하는 서버**를 전제로 한다.
 
-핵심 원칙은 다음과 같다.
+핵심 원칙:
 
-- GitHub `main`이 production source code의 유일한 원본이다.
-- GitHub commit 자체는 배포가 아니다. ChatGPT가 특정 40자리 commit SHA를 명시적으로 배포해야 production이 변경된다.
-- GitHub Actions를 이용한 production 자동 배포는 사용하지 않는다.
-- 서버 working tree 직접 수정은 원칙적으로 금지한다.
-- Manager PostgreSQL DB가 사이트·도메인·repository·배포 상태의 운영 상태 원본이다.
-- root 권한 작업은 제한된 helper를 통한다. web-admin 애플리케이션 자체는 root로 실행하지 않는다.
-- 확인할 수 없는 quota, credit, percentage 등은 만들어서 표시하지 않는다.
+- GitHub `main`이 production source code의 유일한 원본
+- GitHub commit 자체는 배포가 아니며 explicit full SHA 배포가 production 변경 단위
+- GitHub Actions production 자동배포 미사용
+- 서버 working tree 직접 수정은 원칙적으로 금지
+- PostgreSQL `web_manager.manager`가 사이트·도메인·repository·배포 상태의 운영 상태 원본
+- web-admin은 비권한 사용자로 실행
+- root 작업은 제한된 helper를 통해서만 수행
+- 확인할 수 없는 quota/credit/percentage는 UI에 생성하지 않음
 
-## 2. 권장 서버 기준
+## 2. 기준 아키텍처
 
-현재 기준 OS는 Ubuntu 24.04 LTS 계열이다. 최초 구축 시 최소한 다음 구성요소를 설치하고 부팅 시 자동 시작하도록 한다.
+```text
+Internet
+  -> Caddy :80/:443
+      -> web-admin 127.0.0.1:31000 (User=webadmin)
+      -> site containers 127.0.0.1:31001-31999
 
-- Docker Engine 및 Compose plugin
+ChatGPT
+  -> GitHub main commit
+  -> explicit full SHA
+  -> /usr/local/sbin/site-deploy
+  -> Manager DB deployment record
+
+Privileged boundary
+  web-admin -> sudo web-admin-priv -> narrowly allowed root operations
+```
+
+## 3. OS 및 필수 패키지
+
+권장 기준은 Ubuntu 24.04 LTS 계열이다.
+
+필수/권장 구성:
+
+- Docker Engine + Compose plugin
 - Caddy
 - PostgreSQL 16 계열
 - Node.js 22 계열
@@ -29,41 +56,42 @@
 - systemd/journald
 - Desktop Commander Remote Agent
 
-웹 포트는 외부에서 80/443을 허용하고, 개별 애플리케이션은 `127.0.0.1:31000-31999`에만 바인딩한다. 애플리케이션 포트를 인터넷에 직접 공개하지 않는다.
+외부 inbound는 80/443을 공개하고, 앱 포트 31000-31999는 `127.0.0.1`에만 바인딩한다.
 
-## 3. 시스템 사용자와 권한 경계
+## 4. 시스템 사용자와 권한 경계
 
-### 3.1 일반 운영 사용자
+### 4.1 `ubuntu`
 
-`ubuntu` 사용자는 사이트 working tree, PostgreSQL peer 접속 및 일반 서버 운영에 사용한다.
+사이트 working tree, 일반 운영, PostgreSQL peer 접속에 사용한다.
 
-### 3.2 web-admin 사용자
+### 4.2 `webadmin`
 
-별도 system user `webadmin`을 생성한다. web-admin Node 프로세스는 다음 원칙으로 실행한다.
+web-admin Node 프로세스 전용 비권한 system user다.
 
-- `User=webadmin`
-- `Group=webadmin`
-- `SupplementaryGroups=systemd-journal`
-- `PrivateTmp=true`
-- `ProtectHome=true`
-- `ProtectSystem=full`
-- `ReadWritePaths=/run/web-admin /etc/web-manager/secrets`
+systemd 기준:
 
-web-admin에 임의 root shell 권한을 주면 안 된다.
+```text
+User=webadmin
+Group=webadmin
+SupplementaryGroups=systemd-journal
+RuntimeDirectory=web-admin
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/run/web-admin /etc/web-manager/secrets
+```
 
-### 3.3 제한된 privileged bridge
+실제 secret directory는 root-only permission으로 보호되며 web-admin이 임의로 읽거나 쓰지 못한다.
 
-`/usr/local/sbin/web-admin-priv`만 sudo를 허용한다.
+### 4.3 Privileged helper
 
-`/etc/sudoers.d/web-admin` 예시:
+web-admin에는 arbitrary sudo를 주지 않는다. `/usr/local/sbin/web-admin-priv` 하나만 sudoers에 허용하고 helper 내부에서 operation/argument를 검증한다.
 
 ```text
 webadmin ALL=(root) NOPASSWD: /usr/local/sbin/web-admin-priv *
 ```
 
-helper 내부에서 허용되는 작업만 실행하며 arbitrary shell command는 지원하지 않는다. 현재 허용 범위는 Desktop Commander start/stop과 검증된 DuckDNS credential 적용이다.
-
-## 4. 표준 디렉터리 구조
+## 5. 표준 디렉터리 구조
 
 ```text
 /srv/sites/
@@ -82,35 +110,29 @@ helper 내부에서 허용되는 작업만 실행하며 arbitrary shell command�
   site-bootstrap
   web-admin-priv
   manager-backup
+  platform-preflight
 
 /var/backups/web-manager/
 ```
 
-사이트 코드는 각각 독립 Git repository working tree다.
+각 production site는 독립 Git working tree다.
 
-## 5. 비밀정보와 일반 설정 분리
+## 6. Secret 및 일반 설정
 
-### 5.1 일반 설정
+### 6.1 일반 설정
 
-`/etc/web-manager/config.env`는 secret이 아닌 host 설정만 둔다.
+`/etc/web-manager/config.env`에는 secret이 아닌 host 설정만 둔다.
 
 ```text
 SERVER_PUBLIC_IP=<PUBLIC_IPV4>
 ```
 
-권장 권한은 `root:root 0644`이다.
+권장 권한은 `root:root 0644`다.
 
-### 5.2 DuckDNS secret
-
-모든 DuckDNS credential은 다음 형태로 통일한다.
+### 6.2 DuckDNS secret
 
 ```text
 /etc/web-manager/secrets/duckdns/<label>.env
-```
-
-파일 내용 형식:
-
-```text
 DUCKDNS_TOKEN=<TOKEN>
 ```
 
@@ -120,13 +142,13 @@ DUCKDNS_TOKEN=<TOKEN>
 - `/etc/web-manager/secrets/duckdns` : `root:root 0700`
 - 각 `.env` : `root:root 0600`
 
-legacy `/etc/web-manager/secrets/duckdns.env` 경로는 사용하지 않는다.
+legacy `/etc/web-manager/secrets/duckdns.env`는 사용하지 않는다.
 
-Secret은 GitHub, Admin GET 응답, 로그, ChatGPT 사용자 응답에 노출하지 않는다. helper는 `.env`를 shell `source`하지 않고 `DUCKDNS_TOKEN=` 값을 데이터로 파싱해야 한다.
+Secret은 GitHub, Admin GET API, 로그, 프로세스 출력, 사용자 응답에 노출하지 않는다. helper는 env 파일을 shell `source/eval`하지 않고 `DUCKDNS_TOKEN` 값을 데이터로 파싱한다.
 
-## 6. PostgreSQL Manager Control Plane
+## 7. PostgreSQL Manager Control Plane
 
-DB 이름과 역할은 `web_manager`를 사용한다. `manager` schema는 최소한 다음 운영 개념을 포함해야 한다.
+DB/role은 `web_manager`를 사용한다. `manager` schema는 최소 다음 운영 개념을 포함한다.
 
 - `manager.sites`
 - `manager.site_domains`
@@ -136,11 +158,11 @@ DB 이름과 역할은 `web_manager`를 사용한다. `manager` schema는 최소
 - `manager.backups`
 - `manager.dns_providers`
 - `manager.dns_provider_domains`
-- agent/session/operation 관련 테이블
+- agent/session/operation/lock/patch metadata 계열
 
-### 6.1 manager.sites 필수 운영 필드
+### 7.1 `manager.sites` 필수 필드
 
-최소 다음 값을 가진다.
+최소:
 
 - `slug`
 - `status`
@@ -153,271 +175,259 @@ DB 이름과 역할은 `web_manager`를 사용한다. `manager` schema는 최소
 - `framework`
 - `health_status`
 
-`repo_url`과 `repo_branch`는 서버의 실제 `.git/config`보다 상위의 운영 메타데이터다. 배포 runner는 local origin과 Manager DB의 `repo_url`이 다르면 배포를 중단해야 한다.
+`repo_url`, `repo_branch`, `current_commit`은 필수 운영 metadata다. 배포 runner는 local origin과 Manager DB repo URL이 다르면 중단한다.
 
-### 6.2 DuckDNS hostname 전역 유일성
-
-`manager.dns_provider_domains.hostname`은 provider 내부가 아니라 전체 시스템에서 하나의 provider만 소유할 수 있어야 한다.
-
-필수 unique index:
+### 7.2 DuckDNS hostname 전역 유일성
 
 ```sql
 CREATE UNIQUE INDEX dns_provider_domains_hostname_uidx
 ON manager.dns_provider_domains(hostname);
 ```
 
-### 6.3 PostgreSQL peer mapping
+한 hostname은 전체 시스템에서 하나의 provider만 소유한다.
 
-web-admin은 DB password를 웹 프로세스에 두지 않는다. Unix peer mapping으로 `webadmin -> web_manager`, `ubuntu -> web_manager`를 허용한다.
+### 7.3 PostgreSQL peer mapping
 
-## 7. GitHub repository 정책
+web-admin에 DB password를 저장하지 않는다. Unix peer mapping으로 `webadmin -> web_manager`, `ubuntu -> web_manager`를 허용한다.
 
-모든 production 사이트는 사이트별 repository를 사용하며 기본 branch는 `main`이다.
+## 8. GitHub repository 정책
 
-현재 표준 예시는 다음과 같다.
+모든 production site의 기본 branch는 `main`이다.
 
-| slug | repository |
-|---|---|
-| web-admin | `https://github.com/wowhapjs/jswebadmin.git` |
-| rwanda-news | `https://github.com/wowhapjs/jsrwnews.git` |
-| juwon-english | `https://github.com/wowhapjs/jsjohnenglish.git` |
+현재 운영 예시:
 
-서버는 원칙적으로 GitHub에 write할 필요가 없다. ChatGPT의 GitHub connector가 commit을 만들고, 서버는 fetch/read만 한다. Repository가 private으로 전환되면 서버에는 repo별 read-only deploy key를 사용하는 것을 권장한다.
+| slug | repository | branch |
+|---|---|---|
+| web-admin | `https://github.com/wowhapjs/jswebadmin.git` | `main` |
+| rwanda-news | `https://github.com/wowhapjs/jsrwnews.git` | `main` |
+| juwon-english | `https://github.com/wowhapjs/jsjohnenglish.git` | `main` |
 
-## 8. 표준 배포 도구
+GitHub write는 ChatGPT connector가 담당한다. Production 서버는 fetch/read만 한다. private repo는 repo별 read-only deploy key를 우선하며 broad write PAT를 서버에 저장하지 않는다.
 
-### 8.1 `site-deploy`
-
-설치 위치:
-
-```text
-/usr/local/sbin/site-deploy
-```
-
-사용법:
+## 9. 표준 배포 도구: `site-deploy`
 
 ```bash
-site-deploy <slug> <40-char-commit-sha>
+/usr/local/sbin/site-deploy <slug> <40-char-commit-sha>
 ```
 
-runner가 반드시 수행해야 하는 절차:
+runner 필수 절차:
 
-1. slug 및 SHA 형식 검증
-2. Manager DB에서 site/repo URL/repo branch/domain/port 조회
-3. 실제 local origin과 DB repo URL 일치 확인
+1. slug/SHA 검증
+2. Manager DB에서 path/port/domain/repo URL/branch 조회
+3. local origin과 DB repo URL 일치 검증
 4. working tree clean 확인
-5. `origin/<branch>` fetch
-6. SHA 존재 확인
-7. SHA가 `origin/<branch>` ancestry인지 확인
-8. 배포 전 HEAD를 `previous_sha`로 기록
-9. `manager.deployments`에 deploying row 생성
-10. site별 preflight
-11. 정확한 SHA로 reset
-12. 서비스/컨테이너 activation
-13. localhost health check
-14. public HTTPS health check
-15. 성공 시 `manager.sites.current_commit` 갱신
-16. 실패 시 previous SHA로 자동 rollback 및 rollback health check
+5. origin branch fetch
+6. target SHA 존재 확인
+7. target SHA의 branch ancestry 확인
+8. previous SHA 저장 및 deployment row 생성
+9. site별 preflight
+10. 정확한 SHA reset
+11. service/container activation
+12. localhost health
+13. public HTTPS health
+14. `current_commit` 갱신
+15. 실패 시 previous SHA rollback
+16. rollback health 재검증
 
-`git pull`만으로 production을 갱신해서는 안 된다.
+`git pull`은 production release 단위가 아니다.
 
-### 8.2 `site-bootstrap`
-
-설치 위치:
-
-```text
-/usr/local/sbin/site-bootstrap
-```
-
-사용법:
+## 10. 신규 사이트 도구: `site-bootstrap`
 
 ```bash
-site-bootstrap <slug> <name> <repo-url> <sha> <domain> <port> <duckdns-label> [framework]
+/usr/local/sbin/site-bootstrap <slug> <name> <repo-url> <sha> <domain> <port> <duckdns-label> [framework]
 ```
 
-현재 최초 버전은 `static-nginx` 사이트를 지원한다.
+현재 표준은 `static-nginx`를 우선 지원한다.
 
-이 도구의 전제는 **코드와 commit SHA가 이미 GitHub main에 존재한다는 것**이다. 서버에서 HTML이나 compose 파일을 생성해 GitHub보다 먼저 production source를 만드는 방식은 사용하지 않는다.
+전제:
 
-bootstrap은 port/domain/provider 충돌 검사, DuckDNS update, Git clone, Manager DB site/domain 등록, Caddy route 추가 및 검증 후 `site-deploy`를 호출한다.
+- 코드와 SHA가 bootstrap 전에 GitHub `main`에 이미 존재
+- 서버에서 source file을 먼저 생성하지 않음
+- 표준 production site는 hostname 기반
 
-## 9. Manager DB backup
+bootstrap 필수 절차:
 
-`/usr/local/sbin/manager-backup`을 설치한다.
+1. DB/실제 socket port 충돌 검사
+2. domain이 다른 live site에 연결되어 있는지 검사
+3. 기존 hostname provider ownership 우선 적용
+4. DuckDNS credential/API 검증 및 DNS update
+5. Git clone + exact SHA checkout
+6. Manager site/repo/domain metadata 등록
+7. Caddyfile backup -> 변경 -> fmt -> validate -> reload
+8. `site-deploy` 호출
+9. local/public health 확인
+10. 성공 시 active/healthy와 TLS 상태 갱신
 
-기본 실행:
+도메인 없는 public-IP path fallback은 현재 표준 production bootstrap 기본값이 아니다.
+
+## 11. Manager DB Backup
 
 ```bash
 sudo /usr/local/sbin/manager-backup
 ```
 
-백업은 `/var/backups/web-manager`에 PostgreSQL custom format으로 저장하고 다음을 확인해야 한다.
+백업 기준:
 
-- pg_dump exit success
-- dump 파일 non-empty
-- `pg_restore -l` 성공
-- SHA-256 sidecar 생성
+- PostgreSQL custom format
+- dump non-empty
+- `pg_restore -l` 검증
+- SHA-256 sidecar
+- root-only `0600`
 
-Destructive migration 전에 단순히 “백업 명령을 실행했다”가 아니라 위 검증까지 성공해야 한다.
+Destructive migration 전에 반드시 성공 여부를 직접 확인한다.
 
-## 10. web-admin 서비스
+## 12. web-admin 서비스와 API 보안
 
-소스는 `web-admin` GitHub repository에서 관리한다. systemd unit은 repository의 `ops/web-admin.service`를 canonical source로 사용한다.
+- listen: `127.0.0.1:31000`
+- public route: Caddy reverse proxy + 인증
+- process user: `webadmin`
+- root operations: `web-admin-priv` only
 
-web-admin은 `127.0.0.1:31000`에서만 listen하고 Caddy가 reverse proxy한다. 외부 Admin URL에는 Caddy Basic Auth를 적용한다.
+POST write endpoint 최소 보호:
 
-POST API에는 추가 write guard가 있어야 한다.
-
-- custom header `X-Web-Admin-Request: 1`
+- `X-Web-Admin-Request: 1`
 - `Sec-Fetch-Site` cross-site 거부
 - Origin host 검증
-- JSON endpoint의 Content-Type 검증
+- JSON Content-Type 검증
+- CSP/frame/nosniff/no-referrer 계열 response header
 
-응답에는 CSP/frame/referrer/nosniff 계열 보안 헤더를 적용한다.
+arbitrary shell API를 만들지 않는다.
 
-## 11. Admin 모니터링 원칙
+## 13. Admin 모니터링 기준
 
-### 11.1 표시 대상
+- Memory: used/total + 실제 %
+- Disk: used/total + 실제 %
+- Load: 1m load + CPU core 대비 참고값
+- Manager DB: 절대 용량 + 변화 추세, 임의 100% 금지
+- Site storage: directory와 DB 분리
+- Visitors: 오늘 unique client IP + 14일 sparkline
+- Git state: GitHub HEAD / deployed SHA / local SHA, SYNC/BEHIND/DRIFT
+- Desktop Commander: service/process/duplicate/journal, 가짜 usage 없음
 
-- 메모리: 실제 `used / total` 및 percent
-- 디스크: 실제 `used / total` 및 percent
-- Load: 실제 1m load와 CPU core 대비 참고 비율
-- Manager DB: 실제 절대 DB 크기. 임의 100% 기준을 만들지 않는다.
-- 각 사이트 directory size와 DB size를 별도 표시
-- 오늘 unique client IP 방문자 수와 최근 14일 sparkline
-- GitHub HEAD / deployed SHA / local SHA 및 `SYNC`, `BEHIND`, `DRIFT`
-- Desktop Commander service/process/duplicate 및 journal
+Polling/cache 기본값:
 
-### 11.2 polling/cache 기준
+- stats 5초
+- Desktop Commander 10초
+- terminal 5초 incremental cursor
+- site storage 45초 cache
+- GitHub HEAD 60초 cache
+- visitor 60초 cache
+- Manager DB 15초 cache
 
-권장 기본값:
+## 14. Caddy와 Access Logging
 
-- browser stats polling: 약 5초
-- Desktop Commander 상태: 약 10초
-- terminal incremental polling: 약 5초
-- directory/DB size server cache: 약 45초
-- GitHub head cache: 약 60초
-- visitor aggregation cache: 약 60초
-- Manager DB size cache: 약 15초
+Caddy 변경 순서:
 
-Terminal은 매번 전체 journal을 다시 내려보내지 말고 journald cursor 기반 증분 전달을 사용하며 브라우저 로그도 일정 줄 수로 제한한다.
-
-## 12. Caddy와 방문자 로그
-
-모든 public site는 Caddy를 통해서만 접근하게 한다. Caddy config 변경 시 순서는 다음과 같다.
-
-1. 기존 Caddyfile backup
+1. Caddyfile backup
 2. 변경
 3. `caddy fmt`
 4. `caddy validate`
-5. validation 성공 후 reload
+5. 성공 시 reload
+6. 실패 시 backup 복원
 
-Access log는 JSON을 journald/stdout로 남겨 방문자 집계가 가능해야 한다. 방문자는 현재 **하루 unique client IP**로 정의한다. Logging 활성화 이전 과거 데이터는 생성하거나 추정하지 않는다.
+모든 public site access log를 JSON으로 journald/stdout에 남긴다. 방문자는 하루 unique client IP로 정의하며 로깅 활성화 이전 과거 수치를 생성하지 않는다.
 
-## 13. DuckDNS 데이터 모델과 lifecycle
+## 15. DuckDNS 데이터 모델과 Lifecycle
 
-세 리소스를 분리한다.
+```text
+Provider/credential
+  -> Registered hostname inventory
+      -> Site-domain attachment
+```
 
-1. DuckDNS provider/credential
-2. provider에 등록된 hostname inventory
-3. 사이트에 연결된 hostname
-
-사이트 삭제가 DuckDNS 등록 삭제를 의미하지 않는다.
+사이트 삭제와 DuckDNS registered hostname 삭제는 다른 작업이다.
 
 ```text
 등록도메인 추가 -> 사이트 연결 -> 사이트 삭제 -> 등록도메인 유지 -> 다른 사이트에서 재사용
 ```
 
-기존 hostname이 `dns_provider_domains`에 존재하면 그 provider 소유권이 요청 label보다 우선한다.
+규칙:
 
-일반 Save 작업은 기존 등록 hostname을 조용히 삭제할 수 없어야 한다. 등록 hostname 삭제는 별도 explicit destructive flow로 처리한다.
+- 기존 hostname ownership은 요청 label보다 authoritative
+- hostname 전역 unique
+- 일반 Save로 기존 registered hostname 제거 금지
+- 신규 token/credential은 privileged helper가 실제 DuckDNS API `OK`를 확인한 뒤 반영
+- DB 반영은 transaction
+- audit event 기록
 
-DuckDNS 저장 절차:
+## 16. Desktop Commander Remote
 
-1. label/domain/id validation
-2. label immutable 확인
-3. hostname 전역 conflict 확인
-4. 신규 token 또는 기존 secret을 privileged helper로 검증
-5. DuckDNS API update 성공 확인
-6. credential 필요 시 root-only path에 install
-7. DB transaction으로 provider/domain metadata 반영
-8. audit event 기록
-
-## 14. Desktop Commander Remote 운영
-
-Desktop Commander는 process health와 realtime/presence health를 구분한다.
-
-정상 systemd agent는 wrapper와 worker로 2 PID가 보일 수 있으므로 단순 `pgrep` 개수로 agent 중복을 판단하지 않는다. systemd cgroup을 관리 인스턴스 기준으로 사용한다.
+Process health와 realtime/presence health를 별도로 본다.
 
 필수 구성:
 
 - `desktop-commander-remote.service`
 - `Restart=always`
-- 제한 없는 accidental start-limit lockout 방지
-- realtime presence 상태를 확인하는 healthcheck service/timer
+- realtime presence healthcheck service/timer
+- systemd cgroup 기준 duplicate 판별
 - manual stop marker `/run/desktop-commander-manual-stop`
+- 사용자 stop 시 watchdog 자동 재시작 금지
 
-사용자가 Admin에서 정지한 경우 watchdog은 자동 재시작하면 안 된다.
+wrapper + worker 2 PID는 정상일 수 있으므로 단순 `pgrep` 숫자를 agent 수로 해석하지 않는다.
 
-## 15. 최초 설치 권장 순서
+## 17. 최초 설치 순서
 
-1. Ubuntu 업데이트 및 시간/NTP 확인
-2. Docker/Caddy/PostgreSQL/Node/Git/curl 등 설치
+1. Ubuntu update 및 시간/NTP 확인
+2. Docker/Caddy/PostgreSQL/Node/Git/curl/jq 설치
 3. fail2ban/unattended-upgrades 활성화
-4. 80/443 firewall 및 cloud security rule 확인
-5. PostgreSQL `web_manager` DB/role 및 `manager` schema 구성
-6. peer mapping 구성
+4. 80/443 방화벽 및 cloud security rule 확인
+5. `web_manager` DB/role 및 manager schema 구성
+6. PostgreSQL peer mapping 구성
 7. `webadmin` system user 생성
-8. `/srv/sites`, `/etc/web-manager`, `/var/backups/web-manager` 구조 생성
+8. `/srv/sites`, `/etc/web-manager`, `/var/backups/web-manager` 생성
 9. `config.env` 설치
-10. DuckDNS label별 secret 파일 설치
-11. `web-admin` GitHub repository 준비
-12. `site-deploy`, `site-bootstrap`, `web-admin-priv`, `manager-backup`, `platform-preflight` 설치
-13. sudoers restricted helper 등록 및 `visudo -cf` 검증
-14. web-admin systemd unit 설치
-15. Caddy Admin route + Basic Auth 구성
-16. Caddy JSON access logging 구성
-17. Desktop Commander remote systemd service 설치
-18. Desktop Commander realtime healthcheck timer 설치
-19. 각 site의 `repo_url`, `repo_branch`, `current_commit` Manager DB 등록
-20. 각 site를 explicit SHA로 배포
-21. `platform-preflight` 수행
-22. localhost 및 public HTTPS end-to-end 확인
+10. DuckDNS label별 secret 설치
+11. web-admin GitHub repo checkout
+12. ops helper를 `/usr/local/sbin`에 root:root `0750`으로 설치
+13. sudoers 설치 후 `visudo -cf` 검증
+14. `web-admin.service` 설치
+15. Caddy Admin route + 인증 + access logging 구성
+16. Desktop Commander service 설치
+17. Desktop Commander healthcheck timer 설치
+18. 각 live site `repo_url`, `repo_branch`, `current_commit` 등록
+19. 각 사이트를 explicit SHA로 배포
+20. `platform-preflight` 및 public HTTPS 검증
 
-## 16. 설치 완료 판정
-
-다음 명령이 최종 검증 도구다.
+## 18. 설치 완료 판정
 
 ```bash
 sudo /usr/local/sbin/platform-preflight
 ```
 
-최소한 다음이 전부 통과해야 한다.
+최종 설치는 다음이 모두 충족되어야 완료다.
 
-- 필수 binary 존재
-- Docker/Caddy/PostgreSQL/web-admin/DC/watchdog active
-- webadmin user 존재
-- runtime config와 secret directory 권한 정상
-- 표준 helper 설치
-- `repo_url`, `repo_branch`, `current_commit` schema 존재
-- live site repository metadata 완전
-- DuckDNS global hostname unique index 존재
-- legacy DuckDNS secret path 없음
-- Caddy validation 성공
+- `PLATFORM_PREFLIGHT_OK`
+- 모든 live site가 GitHub HEAD = deployed SHA = local HEAD
+- local/public health 정상
+- Caddy validate 정상
+- required services active
+- legacy secret path 없음
 
-## 17. 금지 사항
+## 19. 금지 사항
 
 - production working tree 직접 수정 후 방치
 - GitHub에 secret commit
-- 서버에 GitHub write PAT 저장
-- `git pull` 결과를 검증 없이 production으로 간주
-- web-admin을 root로 실행
-- arbitrary sudo/shell API 제공
-- 사이트 삭제와 DuckDNS registration 삭제를 함께 처리
-- 실제 denominator가 없는 metric에 임의 percentage 표시
-- 공식 source가 없는 quota/credit를 추정값으로 표시
-- health check 없이 배포 성공 선언
+- 서버에 write PAT 저장
+- GitHub push를 production success로 간주
+- GitHub Actions production auto-deploy
+- `git pull`만으로 release 처리
+- web-admin root 실행
+- arbitrary privileged shell API
+- site 삭제와 DuckDNS registration 삭제 결합
+- 의미 없는 percentage/credit 생성
+- health check 없이 성공 선언
+- 검증 실패 backup을 성공으로 보고
 
-## 18. 장애 복구 기본 원칙
+## 20. 장애 복구 기준
 
-코드 장애는 `manager.deployments.metadata.previous_sha` 및 deployment history를 기준으로 마지막 known-good SHA를 재배포한다. DB destructive 작업 전에는 검증된 Manager DB backup이 필수다. Caddy 변경 실패 시 변경 전 backup을 복원한다. Secret 장애는 GitHub가 아니라 `/etc/web-manager/secrets`에서 복구한다.
+- 코드 장애: deployment history의 previous SHA를 기준으로 마지막 known-good SHA 재배포
+- DB destructive 작업: verified backup 전제
+- Caddy validation 실패: 즉시 backup Caddyfile 복원
+- Secret 복구: GitHub가 아니라 root-only secret store 사용
+- drift: 건강한 서비스를 먼저 보존하고 GitHub/Manager/local state를 정합화
+
+## 21. Companion Agent Guide
+
+에이전트의 구체적인 역할, 승인 정책, GitHub-first 코딩, 배포 판단, rollback, DuckDNS lifecycle, Desktop Commander 진단, 모니터링 정직성 및 성공 보고 기준은 `docs/AGENT_ROLE_OPERATIONS_GUIDE_KO.md`를 authoritative guide로 사용한다.
+
+과거 `AGENT_OPERATIONS_GUIDE_ADDENDUM_KO.md`와 v1.1 멀티에이전트 매뉴얼은 최종 운영 지침으로 사용하지 않는다.
