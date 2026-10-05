@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Legacy admin change executor is intentionally gated.
+# Production source creation/deployment must be orchestrated by ChatGPT:
+# GitHub main commit -> explicit SHA -> /usr/local/sbin/site-deploy.
+
+ID="${1:-}"
+DB=(sudo -n -u ubuntu psql -q -U web_manager -d web_manager -At -F $'\t' -v ON_ERROR_STOP=1 -c)
+[[ "$ID" =~ ^[0-9a-f-]{36}$ ]] || { echo 'invalid request id' >&2; exit 2; }
+ROW="$("${DB[@]}" "select request_type,coalesce(site_slug,''),status from manager.admin_change_requests where id='$ID' limit 1")"
+[[ -n "$ROW" ]] || { echo 'request not found' >&2; exit 2; }
+IFS=$'\t' read -r TYPE SLUG STATUS <<<"$ROW"
+[[ "$STATUS" == 'approved' ]] || { echo "request is not approved: $STATUS" >&2; exit 3; }
+MSG="GitHub-first policy: ${TYPE} for ${SLUG:-unknown} must be executed by ChatGPT from a committed GitHub main SHA; legacy direct server mutation is disabled"
+SAFE=${MSG//\'/\'\'}
+"${DB[@]}" "update manager.admin_change_requests set status='failed',executed_at=now(),updated_at=now(),result=jsonb_build_object('error','$SAFE','policy','github_first_chatgpt') where id='$ID'" >/dev/null
+echo "$MSG" >&2
+exit 1
