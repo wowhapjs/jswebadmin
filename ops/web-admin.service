@@ -18,7 +18,7 @@ Environment=NODE_ENV=production
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=/run/web-admin
+ReadWritePaths=/run/web-admin /etc/web-manager/secrets
 
 [Install]
 WantedBy=multi-user.target
