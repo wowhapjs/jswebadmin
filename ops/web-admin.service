@@ -15,7 +15,6 @@ ExecStart=/usr/bin/node /srv/sites/web-admin/server-v2.mjs
 Restart=always
 RestartSec=3
 Environment=NODE_ENV=production
-NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
