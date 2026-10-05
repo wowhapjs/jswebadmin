@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+fail=0
+ok(){ printf 'OK   %s\n' "$1"; }
+bad(){ printf 'FAIL %s\n' "$1" >&2; fail=1; }
+need_cmd(){ command -v "$1" >/dev/null 2>&1 && ok "command $1" || bad "command $1"; }
+need_active(){ systemctl is-active --quiet "$1" && ok "service $1 active" || bad "service $1 inactive"; }
+
+for c in docker caddy psql node git curl; do need_cmd "$c"; done
+for u in docker caddy postgresql web-admin desktop-commander-remote.service desktop-commander-healthcheck.timer; do need_active "$u"; done
+id webadmin >/dev/null 2>&1 && ok 'user webadmin' || bad 'user webadmin'
+
+[[ -f /etc/web-manager/config.env ]] && ok 'server config' || bad 'server config missing'
+[[ -d /etc/web-manager/secrets/duckdns ]] && ok 'DuckDNS secret directory' || bad 'DuckDNS secret directory missing'
+if [[ -d /etc/web-manager/secrets/duckdns ]]; then
+  MODE="$(stat -c %a /etc/web-manager/secrets/duckdns)"; [[ "$MODE" == 700 ]] && ok 'DuckDNS secret dir mode 700' || bad "DuckDNS secret dir mode $MODE"
+fi
+for f in /usr/local/sbin/site-deploy /usr/local/sbin/site-bootstrap /usr/local/sbin/web-admin-priv /usr/local/sbin/manager-backup; do
+  [[ -x "$f" ]] && ok "$f" || bad "$f missing"
+done
+
+DB=(sudo -n -u ubuntu psql -U web_manager -d web_manager -At -v ON_ERROR_STOP=1 -c)
+for col in repo_url repo_branch current_commit; do
+  v="$("${DB[@]}" "select 1 from information_schema.columns where table_schema='manager' and table_name='sites' and column_name='$col'")"
+  [[ "$v" == 1 ]] && ok "manager.sites.$col" || bad "manager.sites.$col missing"
+done
+IDX="$("${DB[@]}" "select 1 from pg_indexes where schemaname='manager' and tablename='dns_provider_domains' and indexname='dns_provider_domains_hostname_uidx'")"
+[[ "$IDX" == 1 ]] && ok 'global DuckDNS hostname unique index' || bad 'global DuckDNS hostname unique index missing'
+
+MISSING="$("${DB[@]}" "select slug from manager.sites where archived_at is null and (coalesce(repo_url,'')='' or coalesce(repo_branch,'')='' or coalesce(current_commit,'')='') order by slug")"
+[[ -z "$MISSING" ]] && ok 'all live sites have repo metadata and deployed SHA' || bad "site metadata incomplete: $MISSING"
+LEGACY="$("${DB[@]}" "select count(*) from manager.dns_providers where credential_ref='/etc/web-manager/secrets/duckdns.env'")"
+[[ "$LEGACY" == 0 ]] && ok 'no legacy DuckDNS credential paths' || bad 'legacy DuckDNS credential path remains'
+[[ ! -e /etc/web-manager/secrets/duckdns.env ]] && ok 'no legacy DuckDNS secret file' || bad 'legacy DuckDNS secret file remains'
+
+caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 && ok 'Caddy configuration valid' || bad 'Caddy configuration invalid'
+
+if ((fail)); then
+  echo 'PLATFORM_PREFLIGHT_FAILED' >&2
+  exit 1
+fi
+echo 'PLATFORM_PREFLIGHT_OK'
