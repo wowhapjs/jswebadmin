@@ -27,7 +27,7 @@ q(){ "${DB[@]}" "$1"; }
 [[ -n "$NAME" ]] || fail "name is required"
 [[ "$REPO_URL" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(\.git)?$ ]] || fail "repo must be a GitHub HTTPS repository"
 [[ "$SHA" =~ ^[0-9a-fA-F]{40}$ ]] || fail "commit must be a full SHA"
-[[ "$DOMAIN" =~ ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.duckdns\.org$ ]] || fail "invalid DuckDNS domain"
+[[ "$DOMAIN" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.duckdns\.org$ ]] || fail "invalid DuckDNS domain"
 [[ "$PORT" =~ ^31[0-9]{3}$ ]] || fail "port must be 31000-31999"
 [[ "$LABEL" =~ ^[a-z0-9_-]{1,40}$ ]] || fail "invalid DuckDNS label"
 [[ "$FRAMEWORK" == 'static-nginx' ]] || fail "unsupported framework: $FRAMEWORK"
@@ -45,6 +45,7 @@ source /etc/web-manager/config.env
 [[ -z "$(q "select id from manager.sites where slug='$(esc "$SLUG")' and archived_at is null limit 1")" ]] || fail "site already exists"
 [[ ! -e "$SITE_DIR" ]] || fail "site directory already exists"
 [[ -z "$(q "select slug from manager.sites where port=$PORT and archived_at is null limit 1")" ]] || fail "port already registered"
+[[ -z "$(q "select s.slug from manager.site_domains d join manager.sites s on s.id=d.site_id where d.hostname='$(esc "$DOMAIN")' and s.archived_at is null limit 1")" ]] || fail "domain is already attached to a live site"
 ss -ltnH | awk '{print $4}' | grep -qE ":${PORT}$" && fail "port already listening"
 
 REMOTE_HEAD="$(git ls-remote "$REPO_URL" "refs/heads/${BRANCH}" | awk 'NR==1{print tolower($1)}')"
@@ -55,7 +56,7 @@ if [[ -n "$MAPPED_LABEL" ]]; then LABEL="$MAPPED_LABEL"; fi
 PROVIDER_ID="$(q "select id from manager.dns_providers where provider_type='dynamic_dns' and label='$(esc "$LABEL")' and status='active' limit 1")"
 [[ -n "$PROVIDER_ID" ]] || fail "DuckDNS provider not found: $LABEL"
 
-# Make sure the credential works and update the DNS record before attaching the site.
+# Validate the credential and update the DNS record before attaching the site.
 /usr/local/sbin/web-admin-priv duckdns-apply "$LABEL" "$DOMAIN" - >/dev/null
 
 install -d -m 0775 -o ubuntu -g ubuntu /srv/sites
@@ -66,8 +67,8 @@ sudo -n -u ubuntu git -C "$SITE_DIR" reset --hard "$SHA" >/dev/null
 SITE_ID="$(q "insert into manager.sites(slug,name,purpose,status,port,bind_address,server_path,container_name,compose_project,repo_path,repo_url,repo_branch,framework,current_commit,health_status) values ('$(esc "$SLUG")','$(esc "$NAME")','GitHub-first managed site','provisioning',$PORT,'127.0.0.1','$(esc "$SITE_DIR")','$(esc "$SLUG")','$(esc "$SLUG")','$(esc "$SITE_DIR")','$(esc "$REPO_URL")','$BRANCH','$(esc "$FRAMEWORK")',null,'unknown') returning id")"
 
 q "begin;
-insert into manager.dns_provider_domains(provider_id,hostname) values ('$PROVIDER_ID','$(esc "$DOMAIN")') on conflict(hostname) do update set provider_id=excluded.provider_id;
-insert into manager.site_domains(site_id,provider_id,hostname,target_ip,is_primary,dns_status,tls_status,last_synced_at) values ('$SITE_ID','$PROVIDER_ID','$(esc "$DOMAIN")','$(esc "$SERVER_PUBLIC_IP")',true,'active','pending',now()) on conflict(hostname) do update set site_id=excluded.site_id,provider_id=excluded.provider_id,target_ip=excluded.target_ip,is_primary=true,dns_status='active',last_synced_at=now(),updated_at=now();
+insert into manager.dns_provider_domains(provider_id,hostname) values ('$PROVIDER_ID','$(esc "$DOMAIN")') on conflict(hostname) do nothing;
+insert into manager.site_domains(site_id,provider_id,hostname,target_ip,is_primary,dns_status,tls_status,last_synced_at) values ('$SITE_ID','$PROVIDER_ID','$(esc "$DOMAIN")','$(esc "$SERVER_PUBLIC_IP")',true,'active','pending',now());
 commit;" >/dev/null
 
 CADDY_BAK="/etc/caddy/Caddyfile.bak-site-bootstrap-$(date -u +%Y%m%dT%H%M%SZ)"
