@@ -15,16 +15,61 @@ case "$CMD" in
     chmod 0644 /run/desktop-commander-manual-stop
     systemctl stop desktop-commander-remote.service
     ;;
-  duckdns-install)
-    TARGET="${2:-}"
-    SOURCE="${3:-}"
-    [[ "$TARGET" == "/etc/web-manager/secrets/duckdns.env" || "$TARGET" =~ ^/etc/web-manager/secrets/duckdns/[a-z0-9_-]{1,40}\.env$ ]] || { echo 'invalid target' >&2; exit 2; }
-    [[ "$SOURCE" =~ ^/run/web-admin/duckdns-[0-9a-f-]{36}\.env$ ]] || { echo 'invalid source' >&2; exit 2; }
-    [[ -f "$SOURCE" && ! -L "$SOURCE" ]] || { echo 'invalid source file' >&2; exit 2; }
-    [[ "$(stat -c '%U' "$SOURCE")" == "webadmin" ]] || { echo 'invalid source owner' >&2; exit 2; }
-    install -d -m 0700 -o root -g root /etc/web-manager/secrets/duckdns
-    install -m 0600 -o root -g root "$SOURCE" "$TARGET"
-    rm -f "$SOURCE"
+  duckdns-apply)
+    LABEL="${2:-}"
+    DOMAINS_CSV="${3:-}"
+    STAGED="${4:--}"
+    [[ "$LABEL" =~ ^[a-z0-9_-]{1,40}$ ]] || { echo 'invalid label' >&2; exit 2; }
+    [[ -n "$DOMAINS_CSV" ]] || { echo 'domains required' >&2; exit 2; }
+    [[ -f /etc/web-manager/config.env ]] || { echo 'server config missing' >&2; exit 2; }
+    # shellcheck disable=SC1091
+    source /etc/web-manager/config.env
+    [[ "${SERVER_PUBLIC_IP:-}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { echo 'invalid SERVER_PUBLIC_IP' >&2; exit 2; }
+
+    IFS=',' read -r -a DOMAINS <<<"$DOMAINS_CSV"
+    ((${#DOMAINS[@]} >= 1 && ${#DOMAINS[@]} <= 50)) || { echo 'invalid domain count' >&2; exit 2; }
+    SUBS=()
+    for D in "${DOMAINS[@]}"; do
+      [[ "$D" =~ ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.duckdns\.org$ ]] || { echo 'invalid DuckDNS domain' >&2; exit 2; }
+      SUBS+=("${D%.duckdns.org}")
+    done
+    SUBDOMAINS="$(IFS=,; echo "${SUBS[*]}")"
+
+    TARGET="/etc/web-manager/secrets/duckdns/${LABEL}.env"
+    SOURCE="$TARGET"
+    if [[ "$STAGED" != '-' ]]; then
+      [[ "$STAGED" =~ ^/run/web-admin/duckdns-[0-9a-f-]{36}\.env$ ]] || { echo 'invalid staged credential' >&2; exit 2; }
+      [[ -f "$STAGED" && ! -L "$STAGED" ]] || { echo 'invalid staged credential file' >&2; exit 2; }
+      [[ "$(stat -c '%U' "$STAGED")" == 'webadmin' ]] || { echo 'invalid staged credential owner' >&2; exit 2; }
+      SOURCE="$STAGED"
+    fi
+    [[ -f "$SOURCE" && ! -L "$SOURCE" ]] || { echo 'credential not found' >&2; exit 2; }
+
+    set +x
+    set -a
+    # shellcheck disable=SC1090
+    source "$SOURCE"
+    set +a
+    DUCK_TOKEN="${DUCKDNS_TOKEN:-${TOKEN:-${DUCKDNS_API_KEY:-}}}"
+    [[ -n "$DUCK_TOKEN" ]] || { echo 'DuckDNS token missing' >&2; exit 2; }
+
+    RESULT="$(curl -fsS --max-time 15 --config - <<EOF
+url = "https://www.duckdns.org/update"
+get
+data-urlencode = "domains=${SUBDOMAINS}"
+data-urlencode = "token=${DUCK_TOKEN}"
+data-urlencode = "ip=${SERVER_PUBLIC_IP}"
+EOF
+)" || { echo 'DuckDNS request failed' >&2; exit 3; }
+    [[ "$RESULT" == 'OK' ]] || { echo 'DuckDNS rejected credential/domain update' >&2; exit 3; }
+
+    if [[ "$STAGED" != '-' ]]; then
+      install -d -m 0700 -o root -g root /etc/web-manager/secrets/duckdns
+      install -m 0600 -o root -g root "$STAGED" "$TARGET"
+      rm -f "$STAGED"
+    fi
+    unset DUCK_TOKEN DUCKDNS_TOKEN TOKEN DUCKDNS_API_KEY
+    printf '%s\n' 'OK'
     ;;
   *)
     echo 'unsupported privileged operation' >&2
