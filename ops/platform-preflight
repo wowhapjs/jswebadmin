@@ -34,6 +34,20 @@ LEGACY="$("${DB[@]}" "select count(*) from manager.dns_providers where credentia
 [[ "$LEGACY" == 0 ]] && ok 'no legacy DuckDNS credential paths' || bad 'legacy DuckDNS credential path remains'
 [[ ! -e /etc/web-manager/secrets/duckdns.env ]] && ok 'no legacy DuckDNS secret file' || bad 'legacy DuckDNS secret file remains'
 
+ROLE_ENUM="$("${DB[@]}" "select count(*) from pg_enum e join pg_type t on t.oid=e.enumtypid join pg_namespace n on n.oid=t.typnamespace where n.nspname='manager' and t.typname='agent_role' and e.enumlabel='READ_ONLY'")"
+[[ "$ROLE_ENUM" == 1 ]] && ok 'READ_ONLY agent role exists' || bad 'READ_ONLY agent role missing'
+ROLE_POLICIES="$("${DB[@]}" "select count(*) from manager.agent_role_policies where permissions->>'public_homepage_url_read'='all' and role::text in ('MAIN_ADMIN','SITE_ADMIN','SITE_DB_ADMIN','READ_ONLY')")"
+[[ "$ROLE_POLICIES" == 4 ]] && ok 'all agent roles can read public homepage URLs' || bad "agent public homepage permission baseline incomplete: $ROLE_POLICIES/4"
+PUBLIC_VIEW="$("${DB[@]}" "select count(*) from information_schema.views where table_schema='manager' and table_name='site_public_overview'")"
+[[ "$PUBLIC_VIEW" == 1 ]] && ok 'manager.site_public_overview exists' || bad 'manager.site_public_overview missing'
+PUBLIC_ROWS="$("${DB[@]}" "select count(*) from manager.site_public_overview where homepage_url is not null")"
+LIVE_ROWS="$("${DB[@]}" "select count(*) from manager.sites where archived_at is null")"
+[[ "$PUBLIC_ROWS" == "$LIVE_ROWS" ]] && ok 'all live sites expose a public homepage URL' || bad "public homepage coverage $PUBLIC_ROWS/$LIVE_ROWS"
+TRIGGER="$("${DB[@]}" "select count(*) from pg_trigger where tgname='agent_sessions_apply_role_policy' and not tgisinternal")"
+[[ "$TRIGGER" == 1 ]] && ok 'agent session role-policy trigger installed' || bad 'agent session role-policy trigger missing'
+ACTIVE_MISSING="$("${DB[@]}" "select count(*) from manager.agent_sessions where status='active' and permissions->>'public_homepage_url_read' is distinct from 'all'")"
+[[ "$ACTIVE_MISSING" == 0 ]] && ok 'active agents have public homepage read permission' || bad "$ACTIVE_MISSING active agent sessions lack public homepage read permission"
+
 caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 && ok 'Caddy configuration valid' || bad 'Caddy configuration invalid'
 
 if ((fail)); then
