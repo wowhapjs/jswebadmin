@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Provision a new production site from an already-committed GitHub main SHA.
+# Usage:
+#   site-bootstrap <slug> <name> <repo-url> <40-char-sha> <domain> <port> <duckdns-label> [framework]
+#
+# Source code must already exist in GitHub. This tool never creates production source files.
+
+SLUG="${1:-}"
+NAME="${2:-}"
+REPO_URL="${3:-}"
+SHA="${4:-}"
+DOMAIN="${5:-}"
+PORT="${6:-}"
+LABEL="${7:-default}"
+FRAMEWORK="${8:-static-nginx}"
+BRANCH=main
+SITE_DIR="/srv/sites/${SLUG}"
+DB=(sudo -n -u ubuntu psql -U web_manager -d web_manager -At -F $'\t' -v ON_ERROR_STOP=1 -c)
+
+fail(){ echo "ERROR: $*" >&2; exit 1; }
+esc(){ printf '%s' "$1" | sed "s/'/''/g"; }
+q(){ "${DB[@]}" "$1"; }
+
+[[ "$SLUG" =~ ^[a-z0-9][a-z0-9-]{0,62}$ && "${SLUG: -1}" != '-' ]] || fail "invalid slug"
+[[ -n "$NAME" ]] || fail "name is required"
+[[ "$REPO_URL" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(\.git)?$ ]] || fail "repo must be a GitHub HTTPS repository"
+[[ "$SHA" =~ ^[0-9a-fA-F]{40}$ ]] || fail "commit must be a full SHA"
+[[ "$DOMAIN" =~ ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.duckdns\.org$ ]] || fail "invalid DuckDNS domain"
+[[ "$PORT" =~ ^31[0-9]{3}$ ]] || fail "port must be 31000-31999"
+[[ "$LABEL" =~ ^[a-z0-9_-]{1,40}$ ]] || fail "invalid DuckDNS label"
+[[ "$FRAMEWORK" == 'static-nginx' ]] || fail "unsupported framework: $FRAMEWORK"
+REPO_URL="${REPO_URL%.git}.git"
+SHA="${SHA,,}"
+
+exec 9>"/run/lock/site-bootstrap-${SLUG}.lock"
+flock -n 9 || fail "bootstrap already running for ${SLUG}"
+
+[[ -f /etc/web-manager/config.env ]] || fail "/etc/web-manager/config.env missing"
+# shellcheck disable=SC1091
+source /etc/web-manager/config.env
+[[ "${SERVER_PUBLIC_IP:-}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || fail "SERVER_PUBLIC_IP not configured"
+
+[[ -z "$(q "select id from manager.sites where slug='$(esc "$SLUG")' and archived_at is null limit 1")" ]] || fail "site already exists"
+[[ ! -e "$SITE_DIR" ]] || fail "site directory already exists"
+[[ -z "$(q "select slug from manager.sites where port=$PORT and archived_at is null limit 1")" ]] || fail "port already registered"
+ss -ltnH | awk '{print $4}' | grep -qE ":${PORT}$" && fail "port already listening"
+
+REMOTE_HEAD="$(git ls-remote "$REPO_URL" "refs/heads/${BRANCH}" | awk 'NR==1{print tolower($1)}')"
+[[ "$REMOTE_HEAD" == "$SHA" ]] || fail "requested SHA is not current GitHub main HEAD"
+
+MAPPED_LABEL="$(q "select p.label from manager.dns_provider_domains d join manager.dns_providers p on p.id=d.provider_id where d.hostname='$(esc "$DOMAIN")' and p.status='active' limit 1")"
+if [[ -n "$MAPPED_LABEL" ]]; then LABEL="$MAPPED_LABEL"; fi
+PROVIDER_ID="$(q "select id from manager.dns_providers where provider_type='dynamic_dns' and label='$(esc "$LABEL")' and status='active' limit 1")"
+[[ -n "$PROVIDER_ID" ]] || fail "DuckDNS provider not found: $LABEL"
+
+# Make sure the credential works and update the DNS record before attaching the site.
+/usr/local/sbin/web-admin-priv duckdns-apply "$LABEL" "$DOMAIN" - >/dev/null
+
+install -d -m 0775 -o ubuntu -g ubuntu /srv/sites
+sudo -n -u ubuntu git clone --branch "$BRANCH" --single-branch "$REPO_URL" "$SITE_DIR"
+sudo -n -u ubuntu git -C "$SITE_DIR" reset --hard "$SHA" >/dev/null
+[[ -z "$(sudo -n -u ubuntu git -C "$SITE_DIR" status --porcelain)" ]] || fail "fresh checkout is dirty"
+
+SITE_ID="$(q "insert into manager.sites(slug,name,purpose,status,port,bind_address,server_path,container_name,compose_project,repo_path,repo_url,repo_branch,framework,current_commit,health_status) values ('$(esc "$SLUG")','$(esc "$NAME")','GitHub-first managed site','provisioning',$PORT,'127.0.0.1','$(esc "$SITE_DIR")','$(esc "$SLUG")','$(esc "$SLUG")','$(esc "$SITE_DIR")','$(esc "$REPO_URL")','$BRANCH','$(esc "$FRAMEWORK")',null,'unknown') returning id")"
+
+q "begin;
+insert into manager.dns_provider_domains(provider_id,hostname) values ('$PROVIDER_ID','$(esc "$DOMAIN")') on conflict(hostname) do update set provider_id=excluded.provider_id;
+insert into manager.site_domains(site_id,provider_id,hostname,target_ip,is_primary,dns_status,tls_status,last_synced_at) values ('$SITE_ID','$PROVIDER_ID','$(esc "$DOMAIN")','$(esc "$SERVER_PUBLIC_IP")',true,'active','pending',now()) on conflict(hostname) do update set site_id=excluded.site_id,provider_id=excluded.provider_id,target_ip=excluded.target_ip,is_primary=true,dns_status='active',last_synced_at=now(),updated_at=now();
+commit;" >/dev/null
+
+CADDY_BAK="/etc/caddy/Caddyfile.bak-site-bootstrap-$(date -u +%Y%m%dT%H%M%SZ)"
+cp -a /etc/caddy/Caddyfile "$CADDY_BAK"
+if ! grep -qF "$DOMAIN {" /etc/caddy/Caddyfile; then
+  cat >>/etc/caddy/Caddyfile <<EOF
+
+$DOMAIN {
+    reverse_proxy 127.0.0.1:$PORT
+}
+EOF
+fi
+caddy fmt --overwrite /etc/caddy/Caddyfile >/dev/null
+if ! caddy validate --config /etc/caddy/Caddyfile >/dev/null; then
+  cp -a "$CADDY_BAK" /etc/caddy/Caddyfile
+  q "update manager.sites set status='failed',health_status='unhealthy' where id='$SITE_ID'" >/dev/null || true
+  fail "Caddy validation failed; configuration restored"
+fi
+systemctl reload caddy
+
+if /usr/local/sbin/site-deploy "$SLUG" "$SHA"; then
+  q "update manager.sites set status='active',health_status='healthy' where id='$SITE_ID'; update manager.site_domains set tls_status='active',updated_at=now() where site_id='$SITE_ID' and is_primary=true" >/dev/null
+  echo "BOOTSTRAP_OK slug=$SLUG sha=$SHA domain=$DOMAIN port=$PORT"
+else
+  q "update manager.sites set status='failed',health_status='unhealthy' where id='$SITE_ID'" >/dev/null || true
+  fail "initial deployment failed; site retained as failed for inspection"
+fi
