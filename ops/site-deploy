@@ -12,6 +12,7 @@ fail(){ echo "ERROR: $*" >&2; exit 1; }
 sql_escape(){ printf '%s' "$1" | sed "s/'/''/g"; }
 psqlq(){ "${DB[@]}" "$1"; }
 git_as(){ local owner="$1" repo="$2"; shift 2; sudo -n -u "$owner" git -C "$repo" "$@"; }
+normalize_repo(){ printf '%s' "$1" | sed -E 's#\.git$##; s#/$##' | tr '[:upper:]' '[:lower:]'; }
 
 [[ "$SLUG" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || fail "invalid slug"
 [[ "$SHA" =~ ^[0-9a-fA-F]{40}$ ]] || fail "commit must be a full 40-character SHA"
@@ -20,24 +21,27 @@ SHA="${SHA,,}"
 exec 9>"/run/lock/site-deploy-${SLUG}.lock"
 flock -n 9 || fail "deployment already running for ${SLUG}"
 
-ROW="$(psqlq "select s.id,s.server_path,coalesce(s.port,0),coalesce(d.hostname,'') from manager.sites s left join lateral (select hostname from manager.site_domains where site_id=s.id and is_primary=true limit 1) d on true where s.slug='$(sql_escape "$SLUG")' and s.archived_at is null limit 1")"
+ROW="$(psqlq "select s.id,s.server_path,coalesce(s.port,0),coalesce(d.hostname,''),coalesce(s.repo_url,''),coalesce(s.repo_branch,'main') from manager.sites s left join lateral (select hostname from manager.site_domains where site_id=s.id and is_primary=true limit 1) d on true where s.slug='$(sql_escape "$SLUG")' and s.archived_at is null limit 1")"
 [[ -n "$ROW" ]] || fail "site not found: ${SLUG}"
-IFS=$'\t' read -r SITE_ID REPO PORT DOMAIN <<<"$ROW"
+IFS=$'\t' read -r SITE_ID REPO PORT DOMAIN REPO_URL BRANCH <<<"$ROW"
 [[ -d "$REPO/.git" ]] || fail "not a git repository: ${REPO}"
+[[ "$REPO_URL" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(\.git)?$ ]] || fail "Manager DB repo_url is missing or invalid"
+[[ "$BRANCH" =~ ^[A-Za-z0-9._/-]{1,128}$ ]] || fail "invalid repo branch"
 OWNER="$(stat -c '%U' "$REPO")"
 ORIGIN="$(git_as "$OWNER" "$REPO" remote get-url origin)"
+[[ "$(normalize_repo "$ORIGIN")" == "$(normalize_repo "$REPO_URL")" ]] || fail "origin URL differs from Manager DB repo_url"
 
 DIRTY="$(git_as "$OWNER" "$REPO" status --porcelain)"
 [[ -z "$DIRTY" ]] || fail "working tree is dirty; server-side edits are forbidden"
 
-git_as "$OWNER" "$REPO" fetch --prune origin main
+git_as "$OWNER" "$REPO" fetch --prune origin "$BRANCH"
 git_as "$OWNER" "$REPO" cat-file -e "${SHA}^{commit}" || fail "commit not found after fetch"
-git_as "$OWNER" "$REPO" merge-base --is-ancestor "$SHA" origin/main || fail "commit is not on origin/main"
+git_as "$OWNER" "$REPO" merge-base --is-ancestor "$SHA" "origin/$BRANCH" || fail "commit is not on origin/$BRANCH"
 PREVIOUS="$(git_as "$OWNER" "$REPO" rev-parse HEAD)"
 
-META="$(python3 - "$ORIGIN" "$PREVIOUS" <<'PY'
+META="$(python3 - "$REPO_URL" "$PREVIOUS" "$BRANCH" <<'PY'
 import json,sys
-print(json.dumps({'repo_url':sys.argv[1],'previous_sha':sys.argv[2],'branch':'main','deployer':'chatgpt-main'}))
+print(json.dumps({'repo_url':sys.argv[1],'previous_sha':sys.argv[2],'branch':sys.argv[3],'deployer':'chatgpt-main'}))
 PY
 )"
 DEPLOY_ID="$(psqlq "insert into manager.deployments(site_id,source_commit,status,message,metadata,started_at) values ('$SITE_ID','$SHA','deploying','GitHub-first deploy','$(sql_escape "$META")'::jsonb,now()) returning id")"
