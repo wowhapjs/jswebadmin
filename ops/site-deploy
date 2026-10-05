@@ -6,7 +6,7 @@ set -Eeuo pipefail
 
 SLUG="${1:-}"
 SHA="${2:-}"
-DB=(sudo -n -u ubuntu psql -U web_manager -d web_manager -At -F $'\t' -v ON_ERROR_STOP=1 -c)
+DB=(sudo -n -u ubuntu psql -q -U web_manager -d web_manager -At -F $'\t' -v ON_ERROR_STOP=1 -c)
 
 fail(){ echo "ERROR: $*" >&2; exit 1; }
 sql_escape(){ printf '%s' "$1" | sed "s/'/''/g"; }
