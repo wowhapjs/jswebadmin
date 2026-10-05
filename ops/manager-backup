@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+OUT_DIR="${1:-/var/backups/web-manager}"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+TMP="${OUT_DIR}/web_manager-${STAMP}.dump.tmp"
+FINAL="${OUT_DIR}/web_manager-${STAMP}.dump"
+
+install -d -m 0700 -o root -g root "$OUT_DIR"
+umask 077
+sudo -n -u ubuntu pg_dump -U web_manager -d web_manager -Fc >"$TMP"
+[[ -s "$TMP" ]] || { rm -f "$TMP"; echo 'backup is empty' >&2; exit 1; }
+pg_restore -l "$TMP" >/dev/null
+mv "$TMP" "$FINAL"
+sha256sum "$FINAL" >"${FINAL}.sha256"
+chmod 0600 "$FINAL" "${FINAL}.sha256"
+printf 'BACKUP_OK %s %s bytes\n' "$FINAL" "$(stat -c %s "$FINAL")"
