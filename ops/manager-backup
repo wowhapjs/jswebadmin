@@ -8,7 +8,7 @@ FINAL="${OUT_DIR}/web_manager-${STAMP}.dump"
 
 install -d -m 0700 -o root -g root "$OUT_DIR"
 umask 077
-sudo -n -u ubuntu pg_dump -U web_manager -d web_manager -Fc >"$TMP"
+sudo -n -u postgres pg_dump -d web_manager -Fc >"$TMP"
 [[ -s "$TMP" ]] || { rm -f "$TMP"; echo 'backup is empty' >&2; exit 1; }
 pg_restore -l "$TMP" >/dev/null
 mv "$TMP" "$FINAL"
