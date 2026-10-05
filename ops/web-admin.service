@@ -1,0 +1,25 @@
+[Unit]
+Description=JS Web Admin Dashboard
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=webadmin
+Group=webadmin
+SupplementaryGroups=systemd-journal
+WorkingDirectory=/srv/sites/web-admin
+RuntimeDirectory=web-admin
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/node /srv/sites/web-admin/server-v2.mjs
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/run/web-admin
+
+[Install]
+WantedBy=multi-user.target
