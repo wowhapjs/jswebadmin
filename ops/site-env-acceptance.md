@@ -1,0 +1,1 @@
+Acceptance: environment inputs are available per site; saved values remain outside Git; status is masked/boolean; invalid requests are rejected; configured environment survives a site container recreation.
