@@ -1,0 +1,1 @@
+This feature manages runtime environment values only. It does not modify site application data or perform database migrations.
