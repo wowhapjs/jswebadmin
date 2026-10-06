@@ -1,0 +1,1 @@
+Operators enter Supabase runtime values through WebAdmin per site. The service stores them outside Git and reports only whether each required value is configured.
