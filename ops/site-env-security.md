@@ -1,0 +1,1 @@
+Site environment secrets are runtime-only and excluded from repository content. UI/API responses expose registration state only. Secret values must not be emitted to logs.
