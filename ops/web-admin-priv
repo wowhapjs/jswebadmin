@@ -15,10 +15,8 @@ case "$CMD" in
     chmod 0644 /run/desktop-commander-manual-stop
     systemctl stop desktop-commander-remote.service
     ;;
-  site-env-status)
-    SLUG="${2:-}"
-    [[ "$SLUG" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo 'invalid slug' >&2; exit 2; }
-    TARGET="/etc/web-manager/secrets/sites/${SLUG}.env"
+  global-env-status)
+    TARGET="/etc/web-manager/secrets/global.env"
     U=false; K=false
     if [[ -f "$TARGET" && ! -L "$TARGET" ]]; then
       grep -q '^SUPABASE_URL=.' "$TARGET" && U=true || true
@@ -26,17 +24,15 @@ case "$CMD" in
     fi
     printf '{"supabaseUrl":%s,"supabaseServiceRoleKey":%s}\n' "$U" "$K"
     ;;
-  site-env-save)
-    SLUG="${2:-}"; STAGED="${3:-}"
-    [[ "$SLUG" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo 'invalid slug' >&2; exit 2; }
-    [[ "$STAGED" =~ ^/run/web-admin/site-env-[0-9a-f-]{36}\.env$ ]] || { echo 'invalid staged env' >&2; exit 2; }
+  global-env-save)
+    STAGED="${2:-}"
+    [[ "$STAGED" =~ ^/run/web-admin/global-env-[0-9a-f-]{36}\.env$ ]] || { echo 'invalid staged env' >&2; exit 2; }
     [[ -f "$STAGED" && ! -L "$STAGED" ]] || { echo 'invalid staged env file' >&2; exit 2; }
     [[ "$(stat -c '%U' "$STAGED")" == 'webadmin' ]] || { echo 'invalid staged env owner' >&2; exit 2; }
     grep -q '^SUPABASE_URL=https://[A-Za-z0-9-]*\.supabase\.co/?$' "$STAGED" || { echo 'invalid Supabase URL' >&2; exit 2; }
     grep -q '^SUPABASE_SERVICE_ROLE_KEY=.' "$STAGED" || { echo 'service role key required' >&2; exit 2; }
-    install -d -m 0700 -o root -g root /etc/web-manager/secrets/sites
-    TARGET="/etc/web-manager/secrets/sites/${SLUG}.env"
-    install -m 0600 -o root -g root "$STAGED" "$TARGET"
+    install -d -m 0700 -o root -g root /etc/web-manager/secrets
+    install -m 0600 -o root -g root "$STAGED" /etc/web-manager/secrets/global.env
     rm -f "$STAGED"
     printf '%s\n' 'OK'
     ;;
