@@ -1,0 +1,1 @@
+Site environment management feature baseline: v1. Values remain runtime secrets; Git stores only implementation code, documentation, and non-secret examples.
