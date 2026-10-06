@@ -1,0 +1,1 @@
+Per-site Supabase configuration is managed as a server runtime secret and is never committed as a credential.
