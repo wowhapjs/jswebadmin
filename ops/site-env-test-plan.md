@@ -1,0 +1,1 @@
+Test without exposing credentials: verify secret file ownership/mode; query boolean status; validate compose configuration; recreate the target container; inspect only whether required environment variable names exist; check local and public HTTP health.
