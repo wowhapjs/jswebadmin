@@ -1,0 +1,1 @@
+The privileged helper and compose wrapper are repository-managed. WebAdmin UI/API changes are deployed only from a Git commit and must pass syntax, local HTTP, public HTTP, and platform preflight checks.
