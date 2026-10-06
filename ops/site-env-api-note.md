@@ -1,0 +1,1 @@
+WebAdmin endpoint contract: `POST /api/site-env` accepts a site slug, Supabase URL, and service-role key. The service-role key is staged only in a mode-0600 runtime file and handed to the privileged helper. `GET /api/stats` returns only boolean registration status (`supabaseUrl`, `supabaseServiceRoleKey`) and never secret values.
