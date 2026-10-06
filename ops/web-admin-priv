@@ -29,7 +29,7 @@ case "$CMD" in
     [[ "$STAGED" =~ ^/run/web-admin/global-env-[0-9a-f-]{36}\.env$ ]] || { echo 'invalid staged env' >&2; exit 2; }
     [[ -f "$STAGED" && ! -L "$STAGED" ]] || { echo 'invalid staged env file' >&2; exit 2; }
     [[ "$(stat -c '%U' "$STAGED")" == 'webadmin' ]] || { echo 'invalid staged env owner' >&2; exit 2; }
-    grep -q '^SUPABASE_URL=https://[A-Za-z0-9-]*\.supabase\.co/?$' "$STAGED" || { echo 'invalid Supabase URL' >&2; exit 2; }
+    grep -Eq '^SUPABASE_URL=https://[A-Za-z0-9-]+\.supabase\.co/?$' "$STAGED" || { echo 'invalid Supabase URL' >&2; exit 2; }
     grep -q '^SUPABASE_SERVICE_ROLE_KEY=.' "$STAGED" || { echo 'service role key required' >&2; exit 2; }
     install -d -m 0700 -o root -g root /etc/web-manager/secrets
     install -m 0600 -o root -g root "$STAGED" /etc/web-manager/secrets/global.env
