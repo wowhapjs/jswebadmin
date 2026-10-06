@@ -1,0 +1,1 @@
+Rollout order: install the privileged helper and compose wrapper, deploy the WebAdmin UI/API commit, then enter site credentials through WebAdmin. No site database migration or deletion is part of this feature.
