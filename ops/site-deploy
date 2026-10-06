@@ -55,6 +55,7 @@ preflight(){
   case "$SLUG" in
     web-admin)
       node --check "$REPO/server-v2.mjs" >/dev/null
+      bash -n "$REPO/ops/web-admin-priv"
       [[ -s "$REPO/app/index.html" ]]
       ;;
     *)
@@ -70,7 +71,10 @@ preflight(){
 
 activate(){
   case "$SLUG" in
-    web-admin) systemctl restart web-admin.service ;;
+    web-admin)
+      install -m 0750 -o root -g root "$REPO/ops/web-admin-priv" /usr/local/sbin/web-admin-priv
+      systemctl restart web-admin.service
+      ;;
     *) if [[ -f /etc/web-manager/secrets/global.env ]]; then
          (cd "$REPO" && docker compose --env-file /etc/web-manager/secrets/global.env up -d --remove-orphans)
        else
