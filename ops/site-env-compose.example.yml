@@ -1,0 +1,6 @@
+# Runtime-generated site environment override example.
+# Actual per-site files live outside Git at /etc/web-manager/site-env-compose/<slug>.yml.
+services:
+  web:
+    env_file:
+      - /etc/web-manager/secrets/sites/<slug>.env
