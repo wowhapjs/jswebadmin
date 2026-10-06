@@ -1,0 +1,1 @@
+Managed site secrets are injected with an external compose override. Production deploy tooling should use `ops/site-env-compose <slug> config -q` and `ops/site-env-compose <slug> up -d --remove-orphans` for non-WebAdmin sites so configured secrets survive container recreation.
