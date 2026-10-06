@@ -51,19 +51,63 @@ mark_failed(){
   psqlq "update manager.deployments set status='$(sql_escape "$status")',message='$(sql_escape "$msg")',finished_at=now() where id='$DEPLOY_ID'" >/dev/null || true
 }
 
+GLOBAL_ENV=/etc/web-manager/secrets/global.env
+GLOBAL_OVERRIDE=/run/web-manager/site-deploy-${SLUG}-global-env.yml
+COMPOSE_ARGS=()
+
+prepare_compose(){
+  COMPOSE_ARGS=(-f "$REPO/compose.yml")
+  rm -f "$GLOBAL_OVERRIDE"
+  [[ -f "$GLOBAL_ENV" ]] || return 0
+  [[ ! -L "$GLOBAL_ENV" ]] || fail "global env must not be a symlink"
+  [[ "$(stat -c '%U:%G:%a' "$GLOBAL_ENV")" == 'root:root:600' ]] || fail "global env permissions must be root:root 600"
+  install -d -m 0755 -o root -g root /run/web-manager
+
+  local targets
+  targets="$(cd "$REPO" && docker compose --env-file "$GLOBAL_ENV" config --format json | python3 -c '
+import json,sys
+port=str(sys.argv[1]); data=json.load(sys.stdin); services=data.get("services",{})
+matches=[]
+for name,svc in services.items():
+    for p in svc.get("ports") or []:
+        if str(p.get("published", "")) == port:
+            matches.append(name); break
+if not matches and len(services)==1:
+    matches=list(services)
+if not matches:
+    raise SystemExit(4)
+for name in matches:
+    print(name)
+' "$PORT")" || fail "could not determine application service for global env injection"
+  [[ -n "$targets" ]] || fail "no application service selected for global env injection"
+
+  {
+    printf '%s\n' 'services:'
+    while IFS= read -r service; do
+      [[ "$service" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "invalid compose service name"
+      printf '  "%s":\n' "$service"
+      printf '%s\n' '    env_file:' '      - /etc/web-manager/secrets/global.env'
+    done <<<"$targets"
+  } >"$GLOBAL_OVERRIDE"
+  chmod 0600 "$GLOBAL_OVERRIDE"
+  COMPOSE_ARGS+=(-f "$GLOBAL_OVERRIDE")
+}
+
 preflight(){
   case "$SLUG" in
     web-admin)
       node --check "$REPO/server-v2.mjs" >/dev/null
       bash -n "$REPO/ops/web-admin-priv"
+      bash -n "$REPO/ops/site-deploy"
       [[ -s "$REPO/app/index.html" ]]
       ;;
     *)
       [[ -f "$REPO/compose.yml" ]] || fail "compose.yml missing"
-      if [[ -f /etc/web-manager/secrets/global.env ]]; then
-        (cd "$REPO" && docker compose --env-file /etc/web-manager/secrets/global.env config -q)
+      prepare_compose
+      if [[ -f "$GLOBAL_ENV" ]]; then
+        (cd "$REPO" && docker compose --env-file "$GLOBAL_ENV" "${COMPOSE_ARGS[@]}" config -q)
       else
-        (cd "$REPO" && docker compose config -q)
+        (cd "$REPO" && docker compose "${COMPOSE_ARGS[@]}" config -q)
       fi
       ;;
   esac
@@ -73,13 +117,17 @@ activate(){
   case "$SLUG" in
     web-admin)
       install -m 0750 -o root -g root "$REPO/ops/web-admin-priv" /usr/local/sbin/web-admin-priv
+      install -m 0750 -o root -g root "$REPO/ops/site-deploy" /usr/local/sbin/site-deploy
       systemctl restart web-admin.service
       ;;
-    *) if [[ -f /etc/web-manager/secrets/global.env ]]; then
-         (cd "$REPO" && docker compose --env-file /etc/web-manager/secrets/global.env up -d --remove-orphans)
-       else
-         (cd "$REPO" && docker compose up -d --remove-orphans)
-       fi ;;
+    *)
+      prepare_compose
+      if [[ -f "$GLOBAL_ENV" ]]; then
+        (cd "$REPO" && docker compose --env-file "$GLOBAL_ENV" "${COMPOSE_ARGS[@]}" up -d --remove-orphans)
+      else
+        (cd "$REPO" && docker compose "${COMPOSE_ARGS[@]}" up -d --remove-orphans)
+      fi
+      ;;
   esac
 }
 
