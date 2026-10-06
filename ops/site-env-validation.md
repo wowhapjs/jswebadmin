@@ -1,1 +1,0 @@
-Validation requires a valid site slug and Supabase project URL. Credential values are accepted only through the guarded WebAdmin write endpoint and passed to the privileged helper through a temporary mode-0600 runtime file.

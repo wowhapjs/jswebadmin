@@ -1,1 +1,0 @@
-Feature: per-site Supabase runtime environment management. Components: WebAdmin environment UI/API, privileged secret helper, external compose override, environment-aware deployment, masked status, and non-secret verification.

@@ -1,1 +1,0 @@
-Runtime environment configuration is site-scoped. A configured site uses an external compose override that references its root-only environment file; sites without configuration continue using their normal compose file.

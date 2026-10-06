@@ -1,1 +1,0 @@
-Environment status is boolean-only. Stored secret values must not be returned to the browser or written to application logs.

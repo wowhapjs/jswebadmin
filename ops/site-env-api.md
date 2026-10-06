@@ -1,1 +1,0 @@
-The WebAdmin site environment write action is same-origin guarded. It validates the target site and stores credentials through the narrow privileged helper. Audit metadata records variable names and site slug only.

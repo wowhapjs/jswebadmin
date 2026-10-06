@@ -1,1 +1,0 @@
-Superseded by the global runtime environment design. Supabase server credentials are stored once in `/etc/web-manager/secrets/global.env`; site containers only receive variables they explicitly reference in their own compose configuration.

@@ -1,1 +1,0 @@
-Release scope is limited to site environment registration, masked status, secure runtime storage, and container injection. Database migration, data deletion, and application refactoring are out of scope.
