@@ -1,0 +1,1 @@
+Active Sites shows an Environment column for Supabase configuration. The credential field is masked, cleared after save, and never populated from stored server data.
