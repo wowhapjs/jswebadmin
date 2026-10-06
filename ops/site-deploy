@@ -59,7 +59,11 @@ preflight(){
       ;;
     *)
       [[ -f "$REPO/compose.yml" ]] || fail "compose.yml missing"
-      (cd "$REPO" && docker compose config -q)
+      if [[ -f /etc/web-manager/secrets/global.env ]]; then
+        (cd "$REPO" && docker compose --env-file /etc/web-manager/secrets/global.env config -q)
+      else
+        (cd "$REPO" && docker compose config -q)
+      fi
       ;;
   esac
 }
@@ -67,7 +71,11 @@ preflight(){
 activate(){
   case "$SLUG" in
     web-admin) systemctl restart web-admin.service ;;
-    *) (cd "$REPO" && docker compose up -d --remove-orphans) ;;
+    *) if [[ -f /etc/web-manager/secrets/global.env ]]; then
+         (cd "$REPO" && docker compose --env-file /etc/web-manager/secrets/global.env up -d --remove-orphans)
+       else
+         (cd "$REPO" && docker compose up -d --remove-orphans)
+       fi ;;
   esac
 }
 
