@@ -16,6 +16,19 @@ const json=(res,code,obj)=>{res.writeHead(code,{...COMMON_HEADERS,'content-type'
 async function sh(cmd,args=[],opts={}){return (await exec(cmd,args,{timeout:opts.timeout||15000,maxBuffer:opts.maxBuffer||12*1024*1024,cwd:opts.cwd,env:opts.env||process.env})).stdout.trim();}
 async function psql(q){return sh('/usr/bin/psql',['-U','web_manager','-d','web_manager','-At','-F','\t','-v','ON_ERROR_STOP=1','-c',q]);}
 async function privileged(...args){return sh('/usr/bin/sudo',['-n','/usr/local/sbin/web-admin-priv',...args]);}
+async function globalEnvStatus(){
+  try{const out=await privileged('global-env-status');return JSON.parse(out);}catch{return{supabaseUrl:false,supabaseServiceRoleKey:false};}
+}
+async function saveGlobalEnv(b){
+  const url=String(b.supabaseUrl||'').trim(),key=String(b.supabaseServiceRoleKey||'').trim();
+  if(!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(url))throw httpError(400,'invalid Supabase URL');
+  if(key.length<20||key.length>8192||/[\r\n]/.test(key))throw httpError(400,'invalid Supabase service role key');
+  const staged=`/run/web-admin/global-env-${randomUUID()}.env`;
+  await fs.writeFile(staged,`SUPABASE_URL=${url}\nSUPABASE_SERVICE_ROLE_KEY=${key}\n`,{mode:0o600});
+  try{await privileged('global-env-save',staged);}finally{await fs.unlink(staged).catch(()=>{});}
+  await audit('global_env_saved','Global Supabase environment updated',{variables:['SUPABASE_URL','SUPABASE_SERVICE_ROLE_KEY']});
+  return await globalEnvStatus();
+}
 const esc=s=>String(s).replaceAll("'","''");
 const httpError=(status,message)=>Object.assign(new Error(message),{status});
 
@@ -197,20 +210,36 @@ async function saveDuckDNS(b){
   return{id:providerId};
 }
 
+function injectGlobalEnvUi(html){
+  const card=`<div class="card"><h2>글로벌 환경변수</h2><p class="muted">서버 공통 Secret 저장소입니다. 실제 값은 Git/화면/로그에 다시 노출하지 않습니다. 사이트 compose에서 변수명을 참조하면 배포 시 자동 사용됩니다.</p><div id="globalEnvStatus" class="muted" style="margin:8px 0 10px">확인 중…</div><div style="display:grid;grid-template-columns:minmax(260px,1.2fr) minmax(260px,1.2fr) auto;gap:10px;align-items:end"><label>SUPABASE_URL<input id="globalSupabaseUrl" placeholder="https://project.supabase.co" autocomplete="off"></label><label>SUPABASE_SERVICE_ROLE_KEY<input id="globalSupabaseKey" type="password" placeholder="저장 후 원문 비표시" autocomplete="new-password"></label><button onclick="saveGlobalEnv()">저장</button></div></div>`;
+  const script=`<script>
+function globalEnvText(st){const ready=st&&st.supabaseUrl&&st.supabaseServiceRoleKey;return ready?'<span class="ok">Supabase 글로벌 환경변수 등록됨</span>':'<span class="muted">미등록</span>';}
+async function loadGlobalEnv(){try{const st=await fetch('/api/global-env',{cache:'no-store'}).then(r=>r.json());document.getElementById('globalEnvStatus').innerHTML=globalEnvText(st);}catch{document.getElementById('globalEnvStatus').innerHTML='<span class="bad">상태 확인 실패</span>';}}
+async function saveGlobalEnv(){const url=document.getElementById('globalSupabaseUrl').value.trim(),key=document.getElementById('globalSupabaseKey').value;try{const r=await fetch('/api/global-env',{method:'POST',headers:{'content-type':'application/json','x-web-admin-request':'1'},body:JSON.stringify({supabaseUrl:url,supabaseServiceRoleKey:key})});const j=await r.json();if(!r.ok)throw Error(j.error||'저장 실패');document.getElementById('globalSupabaseKey').value='';document.getElementById('globalSupabaseUrl').value='';document.getElementById('globalEnvStatus').innerHTML=globalEnvText(j.status);alert('글로벌 환경변수 저장 완료');}catch(err){alert(err.message)}}
+loadGlobalEnv();
+</script>`;
+  const duck='<div class="card"><div class="titleRow"><h2>DuckDNS</h2>';
+  if(!html.includes(duck))throw new Error('DuckDNS UI insertion point missing');
+  return html.replace(duck,card+duck).replace('</body>',script+'</body>');
+}
+
 http.createServer(async(req,res)=>{
   try{
     const u=new URL(req.url||'/','http://localhost');
     if(req.method==='GET'&&u.pathname==='/api/stats')return json(res,200,await stats());
     if(req.method==='GET'&&u.pathname==='/api/providers')return json(res,200,await providers());
+    if(req.method==='GET'&&u.pathname==='/api/global-env')return json(res,200,await globalEnvStatus());
     if(req.method==='GET'&&u.pathname==='/api/desktop')return json(res,200,await desktop());
     if(req.method==='GET'&&u.pathname==='/api/terminal')return json(res,200,await terminal(u.searchParams.get('cursor')||''));
     if(req.method==='POST')requireWriteGuard(req);
     if(req.method==='POST'&&u.pathname==='/api/desktop/start'){await privileged('desktop-start');await audit('desktop_commander_started','Desktop Commander started from web-admin');return json(res,200,{ok:true,...await desktop()});}
     if(req.method==='POST'&&u.pathname==='/api/desktop/stop'){await privileged('desktop-stop');await audit('desktop_commander_stopped','Desktop Commander stopped from web-admin');return json(res,200,{ok:true,service:'inactive'});}
+    if(req.method==='POST'&&u.pathname==='/api/global-env'){const r=await saveGlobalEnv(await body(req));return json(res,200,{ok:true,status:r});}
     if(req.method==='POST'&&u.pathname==='/api/duckdns'){const r=await saveDuckDNS(await body(req));return json(res,200,{ok:true,...r});}
     if(req.method==='GET'&&(u.pathname==='/'||u.pathname==='/index.html')){
       res.writeHead(200,{...COMMON_HEADERS,'content-type':'text/html; charset=utf-8','content-security-policy':"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});
-      return res.end(await fs.readFile('/srv/sites/web-admin/app/index.html'));
+      const html=await fs.readFile('/srv/sites/web-admin/app/index.html','utf8');
+      return res.end(injectGlobalEnvUi(html));
     }
     res.writeHead(404,COMMON_HEADERS);res.end();
   }catch(e){json(res,e.status||500,{error:e.message||'server error'});}
