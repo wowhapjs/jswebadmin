@@ -93,6 +93,27 @@ for name in matches:
   COMPOSE_ARGS+=(-f "$GLOBAL_OVERRIDE")
 }
 
+compose_config_json(){
+  if [[ -f "$GLOBAL_ENV" ]]; then
+    (cd "$REPO" && docker compose --env-file "$GLOBAL_ENV" "${COMPOSE_ARGS[@]}" config --format json)
+  else
+    (cd "$REPO" && docker compose "${COMPOSE_ARGS[@]}" config --format json)
+  fi
+}
+
+build_if_needed(){
+  local targets
+  local -a build_targets=()
+  targets="$(compose_config_json | python3 -c 'import json,sys; d=json.load(sys.stdin); print("\\n".join(n for n,s in d.get("services",{}).items() if s.get("build")))')"
+  [[ -n "$targets" ]] || return 0
+  mapfile -t build_targets <<<"$targets"
+  if [[ -f "$GLOBAL_ENV" ]]; then
+    (cd "$REPO" && docker compose --env-file "$GLOBAL_ENV" "${COMPOSE_ARGS[@]}" build "${build_targets[@]}")
+  else
+    (cd "$REPO" && docker compose "${COMPOSE_ARGS[@]}" build "${build_targets[@]}")
+  fi
+}
+
 preflight(){
   case "$SLUG" in
     web-admin)
@@ -122,6 +143,7 @@ activate(){
       ;;
     *)
       prepare_compose
+      build_if_needed
       if [[ -f "$GLOBAL_ENV" ]]; then
         (cd "$REPO" && docker compose --env-file "$GLOBAL_ENV" "${COMPOSE_ARGS[@]}" up -d --remove-orphans)
       else
@@ -160,6 +182,11 @@ rollback(){
   return 1
 }
 
+post_deploy_cleanup(){
+  [[ "$SLUG" == "web-admin" ]] && return 0
+  timeout 120 docker image prune -f --filter 'until=24h' >/dev/null 2>&1 || true
+}
+
 trap 'rc=$?; if [[ $rc -ne 0 ]]; then rollback || true; fi; exit $rc' ERR
 
 preflight
@@ -170,5 +197,6 @@ health
 
 psqlq "update manager.sites set current_commit='$SHA',updated_at=now() where id='$SITE_ID'; update manager.deployments set status='succeeded',message='Deployed and health-checked',finished_at=now(),metadata=metadata||'{\"local_health\":true,\"public_health\":true}'::jsonb where id='$DEPLOY_ID'" >/dev/null
 trap - ERR
+post_deploy_cleanup
 
 echo "DEPLOY_OK slug=${SLUG} sha=${SHA} previous=${PREVIOUS}"
